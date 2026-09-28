@@ -1,0 +1,729 @@
+{
+  "name": "PIM - Scraping & Qualification IA Catalogue",
+  "nodes": [
+    {
+      "parameters": {},
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -368,
+        -176
+      ],
+      "id": "def836ed-f48a-4703-9b9c-0fb501a75d93",
+      "name": "When clicking ‘Execute workflow’"
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.target_url }}",
+        "options": {
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        -176,
+        32
+      ],
+      "id": "aa5a1e94-87b0-4f26-97c0-a84ff305fe08",
+      "name": "Fetch Product Page"
+    },
+    {
+      "parameters": {
+        "operation": "extractHtmlContent",
+        "extractionValues": {
+          "values": [
+            {
+              "key": "breadcrumb_raw",
+              "cssSelector": ".breadcrumbs, .breadcrumb, nav[aria-label=\"breadcrumb\"], [itemtype*=\"BreadcrumbList\"]"
+            },
+            {
+              "key": "product_name",
+              "cssSelector": "h1.page-title, h1"
+            },
+            {
+              "key": "price_raw",
+              "cssSelector": ".price-wrapper .price, span[data-price-type=\"finalPrice\"], .price"
+            },
+            {
+              "key": "image_url",
+              "cssSelector": "meta[property=\"og:image\"]",
+              "returnValue": "attribute",
+              "attribute": "content"
+            },
+            {
+              "key": "description_raw",
+              "cssSelector": ".product.attribute.overview, .product.info.overview, .product-info-main .value, .product-info-main"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.html",
+      "typeVersion": 1.2,
+      "position": [
+        48,
+        32
+      ],
+      "id": "f129c640-40d1-469b-8b5a-a0c1469a6b02",
+      "name": "Extract Product Elements"
+    },
+    {
+      "parameters": {
+        "modelId": {
+          "__rl": true,
+          "value": "qwen3:8b",
+          "mode": "list",
+          "cachedResultName": "qwen3:8b"
+        },
+        "messages": {
+          "values": [
+            {}
+          ]
+        },
+        "options": {
+          "system": "=Tu es un expert du textile et du e-commerce. Analyse les informations du produit suivant et extrait les caractéristiques sous forme d'un objet JSON strict.\n\nTitre du produit : {{ $json.product_name }}\nDescription : {{ $json.description_raw }}\n\nFormat de réponse attendu (uniquement le JSON, aucun commentaire, aucun markdown en dehors du bloc) :\n{\n  \"matiere_tissage\": [\"ex: Percale de coton\", \"Satin de coton\", \"Lin lavé\", etc.],\n  \"labels_certifications\": [\"ex: Origine France Garantie\", \"Oeko-Tex\", \"Coton biologique\", \"GOTS\", etc.],\n  \"typologie\": \"ex: Parure de couette, Drap housse, Taie d'oreiller, Couette\",\n  \"points_cles\": \"Résumé concis en une phrase des atouts du produit\"\n}",
+          "format": "json"
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.ollama",
+      "typeVersion": 1,
+      "position": [
+        448,
+        32
+      ],
+      "id": "fba92f24-4ff2-470d-8b32-1711a3e60e42",
+      "name": "Message a model",
+      "credentials": {
+        "ollamaApi": {
+          "id": "ollama-credential-id",
+          "name": "Ollama account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Récupération des entrées\nconst items = $input.all();\nconst htmlItems = $('Extract Product Elements').all();\nconst urlItems = $('Deduplicate URLs').all();\n\n// Taxonomie officielle du catalogue\nconst TAXONOMY = {\n  \"Linge de lit\": [\"Parures de lit\", \"Parure de lit\", \"Housses de couette\", \"Housse de couette\", \"Taies d'oreiller\", \"Taie d'oreiller\", \"Draps housses\", \"Drap housse\"],\n  \"Linge de table\": [\"Nappes\", \"Nappe\", \"Torchons\", \"Torchon\", \"Serviettes de table\", \"Serviette de table\", \"Tabliers\", \"Tablier\", \"Sets de table\", \"Set de table\"],\n  \"Literie\": [\"Pack literie -10%\", \"Pack literie\", \"Couettes\", \"Couette\", \"Oreillers\", \"Oreiller\"]\n};\n\nreturn items.map((item, index) => {\n  const rawResponse = item.json.content || '';\n  const htmlData = htmlItems[index]?.json || {};\n  const targetUrl = urlItems[index]?.json?.target_url || '';\n\n  // 1. Parsing JSON LLM\n  let aiData = {};\n  try {\n    const cleaned = rawResponse.replace(/```json/g, '').replace(/```/g, '').trim();\n    aiData = JSON.parse(cleaned);\n  } catch (e) {\n    aiData = {\n      matiere_tissage: [],\n      labels_certifications: [],\n      typologie: \"\",\n      points_cles: \"\"\n    };\n  }\n\n  // 2. Nom produit et prix\n  const productName = htmlData.product_name || htmlData.nom_du_produit || 'Produit sans titre';\n  const rawPrice = htmlData.price_raw || htmlData.prix_brut || '';\n  let cleanPrice = null;\n  if (rawPrice) {\n    const match = rawPrice.replace(/\\s/g, '').replace(',', '.').match(/[\\d.]+/);\n    cleanPrice = match ? parseFloat(match[0]) : null;\n  }\n\n  // 3. Déduction stricte Rayon (Niveau 1) et Sous-rayon (Niveau 2)\n  const fullTextToInspect = [\n    htmlData.breadcrumb_raw || '',\n    targetUrl,\n    productName,\n    aiData.typologie || ''\n  ].join(' ').toLowerCase();\n\n  let detectedRayon = \"Linge de lit\";\n  let detectedSousRayon = \"Parures de lit\";\n\n  let matchFound = false;\n  for (const [rayon, subList] of Object.entries(TAXONOMY)) {\n    for (const sub of subList) {\n      if (fullTextToInspect.includes(sub.toLowerCase())) {\n        detectedRayon = rayon;\n        detectedSousRayon = sub;\n        matchFound = true;\n        break;\n      }\n    }\n    if (matchFound) break;\n  }\n\n  return {\n    json: {\n      nom_produit: productName,\n      url_produit: targetUrl,\n      prix_ttc: cleanPrice,\n      image_url: htmlData.image_url || '',\n      fil_ariane_brut: htmlData.breadcrumb_raw || '',\n      rayon_nom: detectedRayon,\n      sous_rayon_nom: detectedSousRayon,\n      matiere_tissage: aiData.matiere_tissage || [],\n      labels_certifications: aiData.labels_certifications || [],\n      typologie: aiData.typologie || \"\",\n      points_cles: aiData.points_cles || \"\",\n      description_brute: htmlData.description_raw || \"\"\n    }\n  };\n});"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        288,
+        256
+      ],
+      "id": "7b7ffb57-1da7-4a31-9a11-ae4027ccf069",
+      "name": "Format Data for Airtable"
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "base": {
+          "__rl": true,
+          "value": "app_YOUR_AIRTABLE_BASE_ID",
+          "mode": "list",
+          "cachedResultName": "PIM_Catalogue",
+          "cachedResultUrl": "https://airtable.com/app_YOUR_AIRTABLE_BASE_ID"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tbl_PRODUCTS_TABLE_ID",
+          "mode": "list",
+          "cachedResultName": "Produits",
+          "cachedResultUrl": "https://airtable.com/app_YOUR_AIRTABLE_BASE_ID/tbl_PRODUCTS_TABLE_ID"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Nom Produit": "={{ $('Format Data for Airtable').item.json.nom_produit }}",
+            "Prix TTC": "={{ $('Format Data for Airtable').item.json.prix_ttc }}",
+            "Fil d'Ariane Brut": "={{ $('Format Data for Airtable').item.json.fil_ariane_brut }}",
+            "Catégorie": "={{ [$json.id] }}",
+            "Matière / Tissage": "={{ $('Format Data for Airtable').item.json.matiere_tissage }}",
+            "Labels & Certifications": "={{ $('Format Data for Airtable').item.json.labels_certifications }}",
+            "Visuel": "={{ [{ \"url\": $('Format Data for Airtable').item.json.image_url }] }}",
+            "URL Fiche Produit": "={{ $('Format Data for Airtable').item.json.url_produit }}",
+            "Description": "={{ $('Format Data for Airtable').item.json.points_cles }}",
+            "Référence / SKU": "="
+          },
+          "matchingColumns": [
+            "URL Fiche Produit"
+          ],
+          "schema": [
+            {
+              "id": "Nom Produit",
+              "displayName": "Nom Produit",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Référence / SKU",
+              "displayName": "Référence / SKU",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Catégorie",
+              "displayName": "Catégorie",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "array",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Prix TTC",
+              "displayName": "Prix TTC",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "number",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Fil d'Ariane Brut",
+              "displayName": "Fil d'Ariane Brut",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Matière / Tissage",
+              "displayName": "Matière / Tissage",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "array",
+              "options": [
+                {
+                  "name": "Percale de coton biologique",
+                  "value": "Percale de coton biologique"
+                }
+              ],
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Labels & Certifications",
+              "displayName": "Labels & Certifications",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "array",
+              "options": [
+                {
+                  "name": "Origine France Garantie",
+                  "value": "Origine France Garantie"
+                },
+                {
+                  "name": "Coton biologique",
+                  "value": "Coton biologique"
+                }
+              ],
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Description",
+              "displayName": "Description",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "URL Fiche Produit",
+              "displayName": "URL Fiche Produit",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Visuel",
+              "displayName": "Visuel",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "array",
+              "readOnly": false,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {
+          "typecast": true
+        }
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.2,
+      "position": [
+        1008,
+        256
+      ],
+      "id": "717befc3-1912-4418-88c1-10c714745fab",
+      "name": "Airtable - Create Product",
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "airtable-credential-id",
+          "name": "Airtable Personal Access Token account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "url": "https://example-ecommerce-store.com",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.5,
+      "position": [
+        -176,
+        -176
+      ],
+      "id": "842d0bfd-9fb2-49a0-b972-4660bdebae64",
+      "name": "Fetch Category Page"
+    },
+    {
+      "parameters": {
+        "operation": "extractHtmlContent",
+        "extractionValues": {
+          "values": [
+            {
+              "key": "product_url",
+              "cssSelector": ".product-item-link, a.product-item-photo, .product.name a",
+              "returnValue": "attribute",
+              "attribute": "href",
+              "returnArray": true
+            }
+          ]
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.html",
+      "typeVersion": 1.2,
+      "position": [
+        48,
+        -176
+      ],
+      "id": "b6666920-34f0-4d2a-9c3d-155d725bae11",
+      "name": "Extract Product Links"
+    },
+    {
+      "parameters": {
+        "jsCode": "// Récupère la liste brute des URLs extraites\nconst rawUrls = $json.product_url || [];\n\n// Dédoublonnage et filtrage (conserve uniquement les URLs valides contenant .html)\nconst uniqueUrls = [...new Set(rawUrls)].filter(url => \n  url && \n  typeof url === 'string' && \n  url.endsWith('.html') && \n  !url.includes('customer') && \n  !url.includes('checkout')\n);\n\n// Renvoie chaque URL sous forme d'un item distinct pour n8n\nreturn uniqueUrls.map(url => ({\n  json: {\n    target_url: url\n  }\n}));"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        272,
+        -176
+      ],
+      "id": "ef14b8d8-9cd7-4a05-aeaf-eea225af363a",
+      "name": "Deduplicate URLs"
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "base": {
+          "__rl": true,
+          "value": "app_YOUR_AIRTABLE_BASE_ID",
+          "mode": "list",
+          "cachedResultName": "PIM_Catalogue",
+          "cachedResultUrl": "https://airtable.com/app_YOUR_AIRTABLE_BASE_ID"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tbl_CATEGORIES_TABLE_ID",
+          "mode": "list",
+          "cachedResultName": "Catégories",
+          "cachedResultUrl": "https://airtable.com/app_YOUR_AIRTABLE_BASE_IDZ"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Nom Catégorie": "={{ $('Format Data for Airtable').item.json.sous_rayon_nom }}",
+            "Niveau": "Niveau 2 - Famille",
+            "Catégorie Parente": "={{ [$json.id] }}"
+          },
+          "matchingColumns": [
+            "Nom Catégorie"
+          ],
+          "schema": [
+            {
+              "id": "id",
+              "displayName": "id",
+              "required": false,
+              "defaultMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": true,
+              "removed": true
+            },
+            {
+              "id": "Nom Catégorie",
+              "displayName": "Nom Catégorie",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Niveau",
+              "displayName": "Niveau",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "options",
+              "options": [
+                {
+                  "name": "Niveau 1 - Rayon",
+                  "value": "Niveau 1 - Rayon"
+                },
+                {
+                  "name": "Niveau 2 - Famille",
+                  "value": "Niveau 2 - Famille"
+                },
+                {
+                  "name": "Niveau 3 - Sous-catégorie",
+                  "value": "Niveau 3 - Sous-catégorie"
+                }
+              ],
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Catégorie Parente",
+              "displayName": "Catégorie Parente",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "array",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Sous-catégories",
+              "displayName": "Sous-catégories",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "array",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "Produits",
+              "displayName": "Produits",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "array",
+              "readOnly": false,
+              "removed": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.2,
+      "position": [
+        784,
+        256
+      ],
+      "id": "1cb4a397-5ebd-4251-8e76-7c58955cccc2",
+      "name": "Airtable Upsert Sous-Rayon",
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "airtable-credential-id",
+          "name": "Airtable Personal Access Token account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "upsert",
+        "base": {
+          "__rl": true,
+          "value": "app_YOUR_AIRTABLE_BASE_ID",
+          "mode": "list",
+          "cachedResultName": "PIM_Catalogue",
+          "cachedResultUrl": "https://airtable.com/app_YOUR_AIRTABLE_BASE_ID"
+        },
+        "table": {
+          "__rl": true,
+          "value": "tbl_CATEGORIES_TABLE_ID",
+          "mode": "list",
+          "cachedResultName": "Catégories",
+          "cachedResultUrl": "https://airtable.com/app_YOUR_AIRTABLE_BASE_ID/tbl_CATEGORIES_TABLE_ID"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "Nom Catégorie": "={{ $json.rayon_nom }}",
+            "Niveau": "Niveau 1 - Rayon"
+          },
+          "matchingColumns": [
+            "Nom Catégorie"
+          ],
+          "schema": [
+            {
+              "id": "Nom Catégorie",
+              "displayName": "Nom Catégorie",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "string",
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Niveau",
+              "displayName": "Niveau",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "options",
+              "options": [
+                {
+                  "name": "Niveau 1 - Rayon",
+                  "value": "Niveau 1 - Rayon"
+                },
+                {
+                  "name": "Niveau 2 - Famille",
+                  "value": "Niveau 2 - Famille"
+                },
+                {
+                  "name": "Niveau 3 - Sous-catégorie",
+                  "value": "Niveau 3 - Sous-catégorie"
+                }
+              ],
+              "readOnly": false,
+              "removed": false
+            },
+            {
+              "id": "Catégorie Parente",
+              "displayName": "Catégorie Parente",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "array",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "Sous-catégories",
+              "displayName": "Sous-catégories",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "array",
+              "readOnly": false,
+              "removed": true
+            },
+            {
+              "id": "Produits",
+              "displayName": "Produits",
+              "required": false,
+              "defaultMatch": false,
+              "canBeUsedToMatch": true,
+              "display": true,
+              "type": "array",
+              "readOnly": false,
+              "removed": true
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.airtable",
+      "typeVersion": 2.2,
+      "position": [
+        560,
+        256
+      ],
+      "id": "ebe85f40-e93a-4b3c-8835-ecf76020c225",
+      "name": "Airtable Upsert Rayon",
+      "credentials": {
+        "airtableTokenApi": {
+          "id": "airtable-credential-id",
+          "name": "Airtable Personal Access Token account"
+        }
+      }
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "When clicking ‘Execute workflow’": {
+      "main": [
+        [
+          {
+            "node": "Fetch Category Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Product Page": {
+      "main": [
+        [
+          {
+            "node": "Extract Product Elements",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Product Elements": {
+      "main": [
+        [
+          {
+            "node": "Message a model",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Message a model": {
+      "main": [
+        [
+          {
+            "node": "Format Data for Airtable",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Data for Airtable": {
+      "main": [
+        [
+          {
+            "node": "Airtable Upsert Rayon",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Category Page": {
+      "main": [
+        [
+          {
+            "node": "Extract Product Links",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Extract Product Links": {
+      "main": [
+        [
+          {
+            "node": "Deduplicate URLs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Deduplicate URLs": {
+      "main": [
+        [
+          {
+            "node": "Fetch Product Page",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Airtable Upsert Sous-Rayon": {
+      "main": [
+        [
+          {
+            "node": "Airtable - Create Product",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Airtable Upsert Rayon": {
+      "main": [
+        [
+          {
+            "node": "Airtable Upsert Sous-Rayon",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "bf49d9ab-2f43-4e57-9b63-35fe9cd81cce",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "anonymized-instance-id"
+  },
+  "nodeGroups": [],
+  "id": "workflow-id",
+  "tags": []
+}
